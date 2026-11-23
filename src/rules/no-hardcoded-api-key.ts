@@ -7,7 +7,7 @@ const KEY_PATTERNS: [string, RegExp][] = [
   ["Anthropic", /\bsk-ant-[A-Za-z0-9]{2,8}-[A-Za-z0-9_-]{20,}/],
   ["OpenRouter", /\bsk-or-v1-[a-f0-9]{32,}/],
   ["OpenAI", /\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}/],
-  ["Google", /\bAIza[0-9A-Za-z_-]{35}\b/],
+  ["Google", /\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/],
   ["Groq", /\bgsk_[A-Za-z0-9]{40,}/],
   ["xAI", /\bxai-[A-Za-z0-9]{40,}/],
   ["Hugging Face", /\bhf_[A-Za-z0-9]{30,}/],
@@ -16,7 +16,7 @@ const KEY_PATTERNS: [string, RegExp][] = [
 ];
 
 /** Property or variable names that hold a credential. */
-const KEY_NAME = /^(?:x-)?(?:[a-z]+[-_]?)?(?:api[-_]?key|auth[-_]?token|access[-_]?token|secret[-_]?key|bearer[-_]?token)$/i;
+const KEY_NAME = /^[a-z0-9_-]*(?:api[-_]?key|auth[-_]?token|access[-_]?token|secret[-_]?key|bearer[-_]?token)$/i;
 
 const PLACEHOLDER = /x{4,}|\.{3}|your|<|>|\{\{|example|placeholder|dummy|fake|redacted|changeme|replace|insert|\*{3,}|^(?:test|sk-)?$|^sk-[a-z-]*$/i;
 
@@ -97,8 +97,12 @@ const rule: Rule.RuleModule = {
         const name =
           left.type === "Identifier"
             ? left.name
-            : left.type === "MemberExpression" && !left.computed && left.property.type === "Identifier"
-              ? left.property.name
+            : left.type === "MemberExpression"
+              ? !left.computed && left.property.type === "Identifier"
+                ? left.property.name
+                : left.computed && left.property.type === "Literal" && typeof left.property.value === "string"
+                  ? left.property.value
+                  : undefined
               : undefined;
         checkNamed(name, node.right);
       },

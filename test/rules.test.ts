@@ -14,6 +14,7 @@ const tsTester = new RuleTester({ languageOptions: { parser: tsParser, sourceTyp
 tester.run("require-max-tokens", rules["require-max-tokens"]!, {
   valid: [
     `client.messages.create({ model: "claude-opus-5-5", max_tokens: 1024, messages })`,
+    `client.messages.countTokens({ model: "claude-opus-5-5", messages })`,
     `openai.chat.completions.create({ model: "gpt-6-luna", max_completion_tokens: 500, messages })`,
     `openai.responses.create({ model: "gpt-6-luna", max_output_tokens: 500, input })`,
     `ai.models.generateContent({ model: "gemini-3.6-flash", contents, config: { maxOutputTokens: 256 } })`,
@@ -39,12 +40,20 @@ tester.run("require-timeout", rules["require-timeout"]!, {
     `generateText({ model: openai("m"), prompt, abortSignal: AbortSignal.timeout(20000) })`,
     `ai.models.generateContent({ model: "m", contents, config: { abortSignal: s } })`,
     `const client = new OpenAI({ timeout: 20_000 }); client.chat.completions.create({ model: "m", messages })`,
+    `const ai = new GoogleGenAI({ httpOptions: { timeout: 20_000 } }); ai.models.generateContent({ model: "m", contents })`,
     `client.withOptions({ timeout: 5000 }).messages.create({ model: "m", max_tokens: 1, messages })`,
+    `client.withOptions({ signal: controller.signal }).messages.create({ model: "m", max_tokens: 1, messages })`,
+    `const timed = client.withOptions({ signal: controller.signal }); await timed.messages.create({ model: "m", max_tokens: 1, messages })`,
     `openai.chat.completions.create({ model: "m", messages }, requestOptions)`,
   ],
   invalid: [
     { code: `openai.chat.completions.create({ model: "m", messages })`, errors: [{ messageId: "missing" }] },
     { code: `const c = new Anthropic(); c.messages.create({ model: "m", max_tokens: 1, messages })`, errors: [{ messageId: "missing" }] },
+    { code: `const ai = new GoogleGenAI({ httpOptions: { headers: { "x-app": "demo" } } }); ai.models.generateContent({ model: "m", contents })`, errors: [{ messageId: "missing" }] },
+    { code: `const query = new URLSearchParams({ signal: "ready" }); await client.messages.create({ model: "m", messages })`, errors: [{ messageId: "missing" }] },
+    { code: `const opts = new CustomClient({ abortSignal: s }); await client.messages.create({ model: "m", messages })`, errors: [{ messageId: "missing" }] },
+    { code: `other.withOptions({ signal: s }); await client.messages.create({ model: "m", messages })`, errors: [{ messageId: "missing" }] },
+    { code: `other.withOptions({ abortSignal: s }); await client.messages.create({ model: "m", messages })`, errors: [{ messageId: "missing" }] },
     {
       code: `const client = new OpenAI({ timeout: 20_000 }); client.chat.completions.create({ model: "m", messages })`,
       options: [{ checkClients: false }],
@@ -61,20 +70,35 @@ tester.run("no-unbounded-retry", rules["no-unbounded-retry"]!, {
     `while (true) { const job = await poll(); if (job.done) break; await sleep(500); }`,
     `async function f() { while (true) { try { await call(); } catch (e) { console.error(e); return; } } }`,
     `outer: while (true) { for (const x of xs) { try { await call(x); } catch { break outer; } } }`,
+    `outer: for (const x of xs) { while (true) { try { await call(x); break; } catch (e) { if (fatal(e)) break outer; } } }`,
+    `let done = false; while (!done) { try { await call(); done = true; } catch (e) { if (++attempts >= 3) done = true; } }`,
+    `let retrying = true; while (retrying) { try { await call(); retrying = false; } catch (e) { if (++attempts >= 3) retrying = false; } }`,
+    `const done = {}; while (!done[a]) { try { await call(); done[a] = true; } catch (e) { if (++attempts >= 3) done[a] = true; } }`,
   ],
   invalid: [
     { code: `async function f() { while (true) { try { return await openai.chat.completions.create(req); } catch (e) { await sleep(1000); } } }`, errors: [{ messageId: "unbounded" }] },
     { code: `async function f() { for (;;) { try { const r = await fetch(url); return r; } catch {} } }`, errors: [{ messageId: "unbounded" }] },
     { code: `let done = false; while (!done) { try { await call(); done = true; } catch (e) { log(e); } }`, errors: [{ messageId: "unbounded" }] },
+    { code: `let done = false; while (!done) { try { await request(); done = true; } catch (e) { done = false; } }`, errors: [{ messageId: "unbounded" }] },
+    { code: `let done = false; while (!done) { try { await call(); done = true; } catch { done ??= true } }`, errors: [{ messageId: "unbounded" }] },
+    { code: `while (!done) { try { await call(); done = true; } catch { done = false || false } }`, errors: [{ messageId: "unbounded" }] },
+    { code: `let done = 0; while (!done) { try { await call(); done = 1; } catch { done += 1 } }`, errors: [{ messageId: "unbounded" }] },
+    { code: `let retrying = true; while (retrying) { try { await request(); retrying = false; } catch (e) { retrying = true; } }`, errors: [{ messageId: "unbounded" }] },
+    { code: `let done = false; while (!done) { try { await request(); done = true; } catch (e) { let done = true; } }`, errors: [{ messageId: "unbounded" }] },
+    { code: `let done = false; while (!done) { try { await request(); done = true; } catch (e) { let done = false; done = true; } }`, errors: [{ messageId: "unbounded" }] },
+    { code: `let done = false; while (!done) { try { await request(); done = true; } catch (done) { done = true; } }`, errors: [{ messageId: "unbounded" }] },
+    { code: `const done = {}; while (!done[a]) { try { await request(); done[a] = true; } catch (e) { done[b] = true; } }`, errors: [{ messageId: "unbounded" }] },
     { code: `do { try { await call(); break; } catch { continue; } } while (true)`, errors: [{ messageId: "unbounded" }] },
     // A break inside a nested loop doesn't end the retry loop.
     { code: `while (true) { try { await call(); break; } catch { for (const h of hooks) { if (h()) break; } } }`, errors: [{ messageId: "unbounded" }] },
+    { code: `while (true) { try { await call(); break; } catch { inner: for (const h of hooks) { if (h()) break inner; } } }`, errors: [{ messageId: "unbounded" }] },
   ],
 });
 
 const ANTHROPIC = "sk-ant-api03-" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8s9T0";
 const OPENAI = "sk-proj-" + "Ab12Cd34Ef56Gh78Ij90Kl12Mn34Op56Qr78St90";
 const GOOGLE = "AIza" + "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q";
+const GOOGLE_TRAILING_HYPHEN = "AIza" + "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6-";
 
 tester.run("no-hardcoded-api-key", rules["no-hardcoded-api-key"]!, {
   valid: [
@@ -90,8 +114,12 @@ tester.run("no-hardcoded-api-key", rules["no-hardcoded-api-key"]!, {
     { code: `const client = new Anthropic({ apiKey: "${ANTHROPIC}" })`, errors: [{ messageId: "provider", data: { provider: "Anthropic" } }] },
     { code: `const system = \`You are a bot. Use key ${OPENAI} for the API.\``, errors: [{ messageId: "provider", data: { provider: "OpenAI" } }] },
     { code: `export default { gemini: { key: "${GOOGLE}" } }`, errors: [{ messageId: "provider", data: { provider: "Google" } }] },
+    { code: `export default { gemini: { key: "${GOOGLE_TRAILING_HYPHEN}" } }`, errors: [{ messageId: "provider", data: { provider: "Google" } }] },
     { code: `const OPENAI_API_KEY = "a8f3k29dk20fj39dk2l1"`, errors: [{ messageId: "named" }] },
+    { code: `const NEXT_PUBLIC_OPENAI_API_KEY = "a8f3k29dk20fj39dk2l1"`, errors: [{ messageId: "named" }] },
     { code: `fetch(url, { headers: { Authorization: "Bearer a8f3k29dk20fj39dk2l1" } })`, errors: [{ messageId: "named" }] },
+    { code: `headers["x-api-key"] = "a8f3k29dk20fj39dk2l1"`, errors: [{ messageId: "named" }] },
+    { code: `headers["Authorization"] = "Bearer a8f3k29dk20fj39dk2l1"`, errors: [{ messageId: "named" }] },
     { code: `process.env.API_KEY = "a8f3k29dk20fj39dk2l1"`, errors: [{ messageId: "named" }] },
   ],
 });
@@ -100,6 +128,7 @@ tester.run("no-unconsumed-stream", rules["no-unconsumed-stream"]!, {
   valid: [
     `const stream = await openai.chat.completions.create({ model: "m", messages, stream: true }); for await (const c of stream) {}`,
     `async function f() { const result = streamText({ model: m, prompt }); return result.toTextStreamResponse(); }`,
+    `const { textStream } = streamText({ model: m, prompt }); for await (const chunk of textStream) {}`,
     `async function f() { return client.messages.stream({ model: "m", max_tokens: 1, messages }); }`,
     `const s = client.messages.stream({ model: "m", max_tokens: 1, messages }); await s.finalMessage();`,
     `await openai.chat.completions.create({ model: "m", messages })`,
@@ -107,9 +136,11 @@ tester.run("no-unconsumed-stream", rules["no-unconsumed-stream"]!, {
   ],
   invalid: [
     { code: `await openai.chat.completions.create({ model: "m", messages, stream: true });`, errors: [{ messageId: "discarded" }] },
+    { code: `await client?.messages.stream({ model: "m", max_tokens: 1, messages });`, errors: [{ messageId: "discarded" }] },
     { code: `streamText({ model: m, prompt });`, errors: [{ messageId: "discarded" }] },
     { code: `void client.messages.stream({ model: "m", max_tokens: 1, messages });`, errors: [{ messageId: "discarded" }] },
     { code: `const stream = await client.messages.create({ model: "m", max_tokens: 1, messages, stream: true });`, errors: [{ messageId: "unused" }] },
+    { code: `const { textStream } = streamText({ model: m, prompt });`, errors: [{ messageId: "unused" }] },
   ],
 });
 
@@ -119,27 +150,39 @@ tester.run("no-json-parse-llm-output", rules["no-json-parse-llm-output"]!, {
     `JSON.parse(res.body)`,
     `const data = JSON.parse(localStorage.getItem("x"))`,
     `const { text } = await readStuff(); JSON.parse(text)`,
+    `const text = "notAnOutputField"; const { [text]: safe = "{}" } = await generateText({ model: m, prompt }); JSON.parse(safe);`,
+    'JSON.parse(completion.choices[0].message.content.replace(/```json|```/g, "").trim())',
   ],
   invalid: [
     { code: `JSON.parse(completion.choices[0].message.content)`, errors: [{ messageId: "raw" }] },
+    { code: `JSON.parse(completion.choices[0].message.content.trim())`, errors: [{ messageId: "raw" }] },
     { code: `JSON.parse(completion.choices[0].message.tool_calls[0].function.arguments)`, errors: [{ messageId: "raw" }] },
     { code: `JSON.parse(response.output_text)`, errors: [{ messageId: "raw" }] },
     { code: `JSON.parse(msg.content[0].text)`, errors: [{ messageId: "raw" }] },
     { code: `JSON.parse(result.response.text())`, errors: [{ messageId: "raw" }] },
     { code: `const content = completion.choices[0].message.content; const data = JSON.parse(content ?? "{}");`, errors: [{ messageId: "raw" }] },
+    { code: `const data = JSON.parse(ok && completion.choices[0].message.content);`, errors: [{ messageId: "raw" }] },
     { code: `const { text } = await generateText({ model: m, prompt }); JSON.parse(text);`, errors: [{ messageId: "raw" }] },
+    { code: `const { text = "{}" } = await generateText({ model: m, prompt }); JSON.parse(text.trim());`, errors: [{ messageId: "raw" }] },
+    { code: `const { ["text"]: raw = "{}" } = await generateText({ model: m, prompt }); JSON.parse(raw);`, errors: [{ messageId: "raw" }] },
     { code: `const r = await generateText({ model: m, prompt }); JSON.parse(r.text);`, errors: [{ messageId: "raw" }] },
   ],
 });
 
 tsTester.run("typescript syntax", rules["no-json-parse-llm-output"]!, {
   valid: [`const x: number = JSON.parse("1") as number;`],
-  invalid: [{ code: `JSON.parse(completion.choices[0]!.message.content!) as Plan`, errors: [{ messageId: "raw" }] }],
+  invalid: [
+    { code: `JSON.parse(completion.choices[0]!.message.content!) as Plan`, errors: [{ messageId: "raw" }] },
+    { code: `const r = await generateText({ model: m, prompt }); JSON.parse(r!.text);`, errors: [{ messageId: "raw" }] },
+  ],
 });
 
 tsTester.run("typescript stream", rules["no-unconsumed-stream"]!, {
   valid: [],
-  invalid: [{ code: `await (client.messages.stream({ model: "m", max_tokens: 1, messages }) as any);`, errors: [{ messageId: "discarded" }] }],
+  invalid: [
+    { code: `await (client.messages.stream({ model: "m", max_tokens: 1, messages }) as any);`, errors: [{ messageId: "discarded" }] },
+    { code: `await (client.messages.stream({ model: "m", max_tokens: 1, messages }) satisfies Promise<unknown>);`, errors: [{ messageId: "discarded" }] },
+  ],
 });
 
 describe("plugin", () => {

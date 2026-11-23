@@ -33,15 +33,17 @@ const rule: Rule.RuleModule = {
     return {
       CallExpression(node: ESTree.CallExpression) {
         if (!isStreamingCall(node)) return;
-        // Climb through `await` and `void`.
+        // Climb through `await`, `void`, optional chains and TS type assertions.
         let child: ESTree.Node = node;
         let parent = parentOf(node);
         while (
           parent &&
           (parent.type === "AwaitExpression" ||
+            parent.type === "ChainExpression" ||
             (parent.type === "UnaryExpression" && parent.operator === "void") ||
             (parent as { type: string }).type === "TSAsExpression" ||
-            (parent as { type: string }).type === "TSNonNullExpression")
+            (parent as { type: string }).type === "TSNonNullExpression" ||
+            (parent as { type: string }).type === "TSSatisfiesExpression")
         ) {
           child = parent;
           parent = parentOf(parent);
@@ -51,10 +53,23 @@ const rule: Rule.RuleModule = {
           context.report({ node, messageId: "discarded" });
           return;
         }
-        if (parent.type === "VariableDeclarator" && parent.init === child && parent.id.type === "Identifier") {
-          const [variable] = context.sourceCode.getDeclaredVariables(parent);
-          if (variable && !variable.references.some((ref) => ref.isRead())) {
-            context.report({ node: parent.id, messageId: "unused", data: { name: parent.id.name } });
+        if (parent.type === "VariableDeclarator" && parent.init === child) {
+          if (parent.id.type === "Identifier") {
+            const [variable] = context.sourceCode.getDeclaredVariables(parent);
+            if (variable && !variable.references.some((ref) => ref.isRead())) {
+              context.report({ node: parent.id, messageId: "unused", data: { name: parent.id.name } });
+            }
+          } else if (parent.id.type === "ObjectPattern") {
+            const variables = context.sourceCode.getDeclaredVariables(parent);
+            if (variables.length === 0) {
+              context.report({ node, messageId: "discarded" });
+            } else if (variables.every((v) => !v.references.some((ref) => ref.isRead()))) {
+              context.report({
+                node: parent.id,
+                messageId: "unused",
+                data: { name: variables.map((v) => v.name).join(", ") },
+              });
+            }
           }
         }
       },

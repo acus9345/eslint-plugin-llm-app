@@ -1,9 +1,10 @@
-import type { Rule } from "eslint";
+import type { Rule, Scope } from "eslint";
 import type * as ESTree from "estree";
-import { docsUrl, findKey, getLlmCall, keyName, memberPath, unwrap, type LlmCall } from "../utils.js";
+import { docsUrl, findKey, findVariable, getLlmCall, getProp, memberPath, unwrap, type LlmCall } from "../utils.js";
 import { label } from "./require-max-tokens.js";
 
 const TIMEOUT_KEYS = ["timeout", "signal", "abortSignal"];
+const CLIENT_TIMEOUT_KEYS = ["timeout"];
 
 const rule: Rule.RuleModule = {
   meta: {
@@ -35,20 +36,51 @@ const rule: Rule.RuleModule = {
     const pending: LlmCall[] = [];
     let clientTimeout = false;
 
-    function objectHasTimeout(obj: ESTree.ObjectExpression): boolean {
-      return obj.properties.some((p) => p.type === "Property" && ["timeout", "httpOptions"].includes(keyName(p) ?? ""));
+    function objectHasTimeout(obj: ESTree.ObjectExpression, keys: string[]): boolean {
+      if (findKey(obj, keys) === true) return true;
+      const httpOptions = getProp(obj, "httpOptions");
+      if (!httpOptions) return false;
+      if (httpOptions.value.type !== "ObjectExpression") return true;
+      return findKey(httpOptions.value, keys) !== false;
+    }
+
+    function isWithOptionsCallWithTimeout(node: ESTree.CallExpression, keys: string[]): boolean {
+      const path = memberPath(unwrap(node.callee));
+      if (path[path.length - 1] !== "withOptions") return false;
+      const arg = node.arguments[0];
+      return arg?.type === "ObjectExpression" && objectHasTimeout(arg, keys);
+    }
+
+    function calleeHasWithOptionsTimeout(node: ESTree.Node, scope: Scope.Scope, depth = 0): boolean {
+      let cur: ESTree.Node | undefined = unwrap(node);
+      while (cur) {
+        if (cur.type === "CallExpression") {
+          if (isWithOptionsCallWithTimeout(cur, TIMEOUT_KEYS)) return true;
+          cur = unwrap(cur.callee);
+        } else if (cur.type === "MemberExpression") {
+          cur = unwrap(cur.object);
+        } else if (cur.type === "Identifier" && checkClients && depth < 2) {
+          const v = findVariable(scope, cur.name);
+          const def = v?.defs[0];
+          if (v?.defs.length === 1 && def?.node.type === "VariableDeclarator" && def.node.init) {
+            return calleeHasWithOptionsTimeout(def.node.init, scope, depth + 1);
+          }
+          break;
+        } else {
+          break;
+        }
+      }
+      return false;
     }
 
     return {
       NewExpression(node: ESTree.NewExpression) {
         const arg = node.arguments[0];
-        if (arg?.type === "ObjectExpression" && objectHasTimeout(arg)) clientTimeout = true;
+        if (arg?.type === "ObjectExpression" && objectHasTimeout(arg, CLIENT_TIMEOUT_KEYS)) clientTimeout = true;
       },
       CallExpression(node: ESTree.CallExpression) {
-        // `client.withOptions({ timeout })` and `createOpenAI({ fetch: ... })`-style factories.
-        const path = memberPath(unwrap(node.callee));
-        const arg = node.arguments[0];
-        if (path[path.length - 1] === "withOptions" && arg?.type === "ObjectExpression" && objectHasTimeout(arg)) {
+        // `client.withOptions({ timeout })` counts as a file-level client timeout.
+        if (isWithOptionsCallWithTimeout(node, CLIENT_TIMEOUT_KEYS)) {
           clientTimeout = true;
         }
 
@@ -58,6 +90,7 @@ const rule: Rule.RuleModule = {
         if (inRequest !== false) return;
         if (call.options && findKey(call.options, TIMEOUT_KEYS) !== false) return;
         if (node.arguments[1] && !call.options) return; // options passed as a variable
+        if (calleeHasWithOptionsTimeout(node.callee, context.sourceCode.getScope(node))) return;
         pending.push(call);
       },
       "Program:exit"() {
